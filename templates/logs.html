@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Logs</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <h1>Log Entries</h1>
+    <table border="1">
+        <tr>
+            <th>ID</th>
+            <th>Action</th>
+            <th>Timestamp</th>
+            <th>Country</th>
+            <th>OS Info</th>
+            <th>CPU Arch</th>
+        </tr>
+        {% for log in logs %}
+        <tr>
+            <td>{{ log.id }}</td>
+            <td>{{ log.action }}</td>
+            <td>{{ log.timestamp }}</td>
+            <td>{{ log.country }}</td>
+            <td>{{ log.os_info }}</td>
+            <td>{{ log.cpu_arch }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</body>
+</html>

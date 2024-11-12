@@ -1,0 +1,11 @@
+services:
+  flask-app:
+    image: flask-analytics  # 使用 Docker Hub 上的镜像
+    ports:
+      - "5000:5000"
+    volumes:
+      - .:/app
+      - ./logs.db:/app/logs.db  # 将数据库文件挂载到容器中
+    environment:
+      - FLASK_APP=app.py
+      - FLASK_RUN_HOST=0.0.0.0
