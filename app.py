@@ -1,68 +1,180 @@
-import os
-from flask import Flask, request, jsonify, render_template
-from config import Config
-from models import db, Log
+from flask import Flask, request, render_template, jsonify
 from datetime import datetime, timedelta
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.interval import IntervalTrigger
+import csv
+from io import StringIO
+import sqlite3
+import pymysql
+import os
+from config import Config
+from functools import wraps
+from flask import session, redirect, url_for
 
-# 创建 Flask 应用
 app = Flask(__name__)
-app.config.from_object(Config)
-db.init_app(app)
 
-# 定义日志清理任务
-def clear_old_logs():
-    """清理 3 天前的日志"""
-    cutoff_date = datetime.utcnow() - timedelta(days=3)
-    logs_to_delete = Log.query.filter(Log.timestamp < cutoff_date.strftime('%Y-%m-%d %H:%M:%S')).all()
+# 添加session配置
+app.secret_key = os.urandom(24)
+app.permanent_session_lifetime = timedelta(hours=2)  # session保持2小时
+
+def get_db_connection():
+    if Config.DB_TYPE == 'mysql':
+        return pymysql.connect(
+            host=Config.MYSQL_HOST,
+            port=int(Config.MYSQL_PORT),
+            user=Config.MYSQL_USER,
+            password=Config.MYSQL_PASSWORD,
+            database=Config.MYSQL_DATABASE,
+            charset='utf8mb4'
+        )
+    else:
+        if not os.path.exists('instance'):
+            os.makedirs('instance')
+        return sqlite3.connect(Config.SQLITE_DB_PATH)
+
+def init_db():
+    conn = get_db_connection()
+    c = conn.cursor()
     
-    for log in logs_to_delete:
-        db.session.delete(log)
+    if Config.DB_TYPE == 'mysql':
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS logs (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                action VARCHAR(255) NOT NULL,
+                timestamp VARCHAR(255) NOT NULL,
+                country VARCHAR(255),
+                os_info VARCHAR(255),
+                cpu_arch VARCHAR(255)
+            )
+        ''')
+    else:
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                country TEXT,
+                os_info TEXT,
+                cpu_arch TEXT
+            )
+        ''')
     
-    db.session.commit()
-    print(f"清理了 {len(logs_to_delete)} 条过期日志")
+    conn.commit()
+    conn.close()
 
-# 定期任务设置
-scheduler = BackgroundScheduler()
-scheduler.add_job(
-    func=clear_old_logs,
-    trigger=IntervalTrigger(hours=24),  # 每天检查一次过期日志
-    id='clear_old_logs',
-    name='每 24 小时清理一次日志',
-    replace_existing=True
-)
-scheduler.start()
+# 初始化数据库
+init_db()
 
-# 创建数据库表
-with app.app_context():
-    db.create_all()
+# 修改登录验证装饰器
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if Config.WEB_PASSWORD and not session.get('logged_in'):
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
 
-# 接收日志的 API
+# 添加登录路由
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if not Config.WEB_PASSWORD:
+        return redirect(url_for('view_logs'))
+        
+    if request.method == 'POST':
+        if request.form.get('password') == Config.WEB_PASSWORD:
+            session.permanent = True  # 启用永久session
+            session['logged_in'] = True
+            return redirect(url_for('view_logs'))
+        return render_template('login.html', error='密码错误')
+    return render_template('login.html')
+
 @app.route('/api/log', methods=['POST'])
-def log():
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'Invalid data'}), 400
+def collect_log():
+    try:
+        data = request.get_json()
+        
+        # 验证必需字段
+        required_fields = ['action', 'timestamp', 'country', 'os_info', 'cpu_arch']
+        if not all(field in data for field in required_fields):
+            return jsonify({'error': 'Missing required fields'}), 400
+        
+        # 存储到数据库
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        if Config.DB_TYPE == 'mysql':
+            c.execute('''
+                INSERT INTO logs (action, timestamp, country, os_info, cpu_arch)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (
+                data['action'],
+                data['timestamp'],
+                data['country'],
+                data['os_info'],
+                data['cpu_arch']
+            ))
+        else:
+            c.execute('''
+                INSERT INTO logs (action, timestamp, country, os_info, cpu_arch)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (
+                data['action'],
+                data['timestamp'],
+                data['country'],
+                data['os_info'],
+                data['cpu_arch']
+            ))
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({'status': 'success'}), 200
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
-    action = data.get("action")
-    timestamp = data.get("timestamp", datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'))
-    country = data.get("country")
-    os_info = data.get("os_info")
-    cpu_arch = data.get("cpu_arch")
-
-    new_log = Log(action=action, timestamp=timestamp, country=country, os_info=os_info, cpu_arch=cpu_arch)
-    db.session.add(new_log)
-    db.session.commit()
-
-    return jsonify({'message': 'Log received'}), 201
-
-# 展示日志的网页
-@app.route('/logs', methods=['GET'])
+@app.route('/logs')
+@login_required
 def view_logs():
-    logs = Log.query.all()
-    return render_template('logs.html', logs=logs)
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    if Config.DB_TYPE == 'mysql':
+        c.execute('SELECT * FROM logs ORDER BY id ASC')
+    else:
+        c.execute('SELECT * FROM logs ORDER BY id ASC')
+    
+    logs = c.fetchall()
+    conn.close()
+    
+    # 将查询结果转换为字典列表
+    logs_list = []
+    for log in logs:
+        logs_list.append({
+            'id': log[0],
+            'action': log[1],
+            'timestamp': log[2],
+            'country': log[3],
+            'os_info': log[4],
+            'cpu_arch': log[5]
+        })
+    
+    return render_template('logs.html', logs=logs_list)
 
-# 启动应用
+@app.route('/clear-logs', methods=['POST'])
+def clear_logs():
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        if Config.DB_TYPE == 'mysql':
+            c.execute('DELETE FROM logs')
+        else:
+            c.execute('DELETE FROM logs')
+        
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'success', 'message': '日志已清除'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0')
+    app.run(host='0.0.0.0', port=5000) 
