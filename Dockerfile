@@ -9,12 +9,17 @@ RUN apt-get update && apt-get install -y \
     python3-dev \
     libffi-dev \
     libssl-dev \
+    pkg-config \
+    rust-all \
     && rm -rf /var/lib/apt/lists/*
 
-COPY . .
+COPY requirements.txt .
 
 RUN pip install --no-cache-dir -U pip && \
+    pip install --no-cache-dir wheel && \
     pip install --no-cache-dir -r requirements.txt
+
+COPY . .
 
 RUN mkdir -p instance
 
